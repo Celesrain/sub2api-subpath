@@ -1,0 +1,25 @@
+{
+  "repository": "Wei-Shaw/sub2api",
+  "ref": "v0.2.17",
+  "revision": "060d0160417782cd962a0c7f460f6cd4565d4916",
+  "commit_date": "2026-10-16T04:28:11Z",
+  "source_sha256": "56f651a367a5ea78cd065fd87a71aba73bd80a9964c9fbb4f78451251aca425e",
+  "patch_revision": 2,
+  "base_path": "runtime:APP_BASE_PATH",
+  "pnpm_version": "9.15.9",
+  "images": {
+    "node:24-alpine": "node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53",
+    "golang:1.27.2-alpine": "golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d",
+    "alpine:3.21": "alpine:3.21@sha256:fbea4ca676632cb44223a6a040cac2c7e6c108e23aebc10bb7b1d893b6d9acdd",
+    "postgres:18-alpine": "postgres:18-alpine@sha256:83148c0bc09eac4d598b70a61e1404d0212b76c95c504bfd6c81a4c59ec91792",
+    "redis:8-alpine": "redis:8-alpine@sha256:615b4cedaff0c1437a1548acae4222572df8c021eeb7382d64cb8b5e3a13ac7a",
+    "nginx:stable-alpine": "nginx:stable-alpine@sha256:c59d1f8b1e0e42da75be973424cd72e23f7f8adfb54e982f4d1cd0216a5a5576"
+  },
+  "default_base_path": "/",
+  "smoke_base_paths": [
+    "/",
+    "/s2a/",
+    "/tools/ai/"
+  ],
+  "builder_repository": "Celesrain/sub2api-subpath"
+}

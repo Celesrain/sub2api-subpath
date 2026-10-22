@@ -1,0 +1,92 @@
+name: Build and publish image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Explicit upstream release tag; leave empty for upstream.lock.json'
+        type: string
+        default: ''
+      publish:
+        description: 'Publish the verified image to GHCR'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Check upload allowlist and environment-file integration
+        run: |
+          python check_public_tree.py
+          python test_nginx_env.py
+          docker compose --env-file .env.template config --quiet
+          python nginx_config.py --env-file .env.template > /tmp/sub2api-locations.conf
+      - name: Build and test the locked upstream variant
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: python ci.py build
+      - name: Export only the verified image and public provenance
+        run: python ci.py export
+      - name: Save verified image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-image
+          path: |
+            dist/image.tar.gz
+            dist/build.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out publisher
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Download this run's verified image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-image
+          path: dist
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify artifact and publish tested image
+        run: python ci.py publish

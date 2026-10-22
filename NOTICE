@@ -1,0 +1,11 @@
+Sub2API subpath build variant
+
+Upstream project: https://github.com/Wei-Shaw/sub2api
+Upstream license: GNU Lesser General Public License version 3 (see LICENSE).
+Exact upstream revision and source archive checksum: upstream.lock.json.
+
+This repository maintains source patches and reproducible build tools for a
+runtime-configurable public mount path. The modified frontend and embedded-web
+code are provided in patches/. Upstream business logic remains unmodified.
+Images record their upstream source and patch checksums in
+/app/s2a-build-manifest.json.

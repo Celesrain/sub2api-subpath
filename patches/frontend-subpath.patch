@@ -1,0 +1,610 @@
+--- /dev/null
++++ b/frontend/src/api/__tests__/subpath-deployment.spec.ts
+@@ -0,0 +1,46 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { createRouter, createMemoryHistory } from 'vue-router'
++
++afterEach(() => {
++  document.querySelectorAll('base').forEach(node => node.remove())
++  vi.unstubAllEnvs()
++  vi.resetModules()
++})
++
++describe('runtime deployment base', () => {
++  it.each(['/', '/s2a/', '/tools/ai/'])('uses %s for routes, resources and API calls', async (prefix) => {
++    const tag = document.createElement('base')
++    tag.setAttribute('href', prefix)
++    document.head.prepend(tag)
++    vi.stubEnv('VITE_API_BASE_URL', '')
++    vi.resetModules()
++    const base = await import('@/utils/appBase')
++    const urls = await import('../url')
++    const markers = await import('../adminUIRequest')
++    const mount = prefix.replace(/\/+$/, '')
++    expect(base.getAppBase()).toBe(mount || '/')
++    expect(base.appPath('/login?next=%2Fadmin')).toBe(`${mount}/login?next=%2Fadmin`)
++    expect(base.appPath(`${mount}/login`)).toBe(`${mount}/login`)
++    expect(base.appPath('/logo.svg')).toBe(`${mount}/logo.svg`)
++    expect(base.appPath('https://oauth.example/callback')).toBe('https://oauth.example/callback')
++    expect(base.appPath('//cdn.example/logo.svg')).toBe('//cdn.example/logo.svg')
++    expect(base.appOrigin()).toBe(`${window.location.origin}${mount}`)
++    expect(urls.buildApiUrl('/auth/me?mode=test')).toBe(`${mount}/api/v1/auth/me?mode=test`)
++    expect(urls.buildApiUrl('/api/v1/admin/users')).toBe(`${mount}/api/v1/admin/users`)
++    expect(new URL(urls.buildGatewayUrl('/setup/status')).pathname).toBe(`${mount}/setup/status`)
++    expect(new URL(urls.buildGatewayUrl('/v1/responses')).pathname).toBe(`${mount}/v1/responses`)
++    expect(new URL(urls.buildGatewayUrl('/api/v1/admin/ops/ws/qps')).pathname).toBe(`${mount}/api/v1/admin/ops/ws/qps`)
++    expect(markers.shouldMarkAdminUIRequest(`${mount}/api/v1/admin/users`, `${mount}/admin/users`)).toBe(true)
++    expect(markers.shouldMarkAdminUIRequest(`${mount}/api/v1/auth/me`, `${mount}/dashboard`)).toBe(false)
++    expect(markers.shouldMarkUserUIRequest(`${mount}/api/v1/keys`)).toBe(true)
++    const router = createRouter({ history: createMemoryHistory(base.getAppBase()), routes: [{ path: '/login', component: {} }] })
++    expect(router.resolve('/login').href).toBe(`${mount}/login`)
++  })
++
++  it('keeps an explicitly configured external API origin', async () => {
++    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.test/api/v1')
++    vi.resetModules()
++    const urls = await import('../url')
++    expect(urls.buildApiUrl('/auth/me')).toBe('https://api.example.test/api/v1/auth/me')
++  })
++})
+--- a/frontend/src/api/adminUIRequest.ts
++++ b/frontend/src/api/adminUIRequest.ts
+@@ -1,3 +1,4 @@
++import { stripAppBase } from '@/utils/appBase'
+ export const ADMIN_UI_REQUEST_HEADER = 'X-Admin-UI-Request'
+ export const USER_UI_REQUEST_HEADER = 'X-User-UI-Request'
+ 
+@@ -15,7 +16,7 @@
+   if (!value) return ''
+   try {
+     const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost'
+-    return new URL(value, origin).pathname
++    return stripAppBase(new URL(value, origin).pathname)
+   } catch {
+     return value.split(/[?#]/, 1)[0]
+   }
+@@ -70,7 +71,7 @@
+ export function shouldMarkAdminUIRequest(requestURL: string, pagePath?: string): boolean {
+   const currentPath =
+     pagePath ?? (typeof window !== 'undefined' ? window.location.pathname : '')
+-  return isAdminPath(requestPath(requestURL)) || isAdminPath(currentPath)
++  return isAdminPath(requestPath(requestURL)) || isAdminPath(stripAppBase(currentPath))
+ }
+ 
+ export function shouldMarkUserUIRequest(requestURL: string): boolean {
+--- a/frontend/src/api/client.ts
++++ b/frontend/src/api/client.ts
+@@ -1,3 +1,4 @@
++import { appPath } from '@/utils/appBase'
+ /**
+  * Axios HTTP Client Configuration
+  * Base client with interceptors for authentication, token refresh, and error handling
+@@ -131,8 +132,8 @@
+           // ignore event failures
+         }
+ 
+-        if (window.location.pathname.startsWith('/admin/ops')) {
+-          window.location.href = '/admin/settings'
++        if (window.location.pathname.startsWith(appPath('/admin/ops'))) {
++          window.location.href = appPath('/admin/settings')
+         }
+ 
+         return Promise.reject({
+@@ -219,7 +220,7 @@
+             sessionStorage.setItem('auth_expired', '1')
+ 
+             if (!window.location.pathname.includes('/login')) {
+-              window.location.href = '/login'
++              window.location.href = appPath('/login')
+             }
+ 
+             return Promise.reject({
+@@ -250,7 +251,7 @@
+         }
+         // Only redirect if not already on login page
+         if (!window.location.pathname.includes('/login')) {
+-          window.location.href = '/login'
++          window.location.href = appPath('/login')
+         }
+       }
+ 
+--- a/frontend/src/api/codex.ts
++++ b/frontend/src/api/codex.ts
+@@ -1,3 +1,4 @@
++import { appOrigin } from '@/utils/appBase'
+ export interface CodexModelsManifestResult {
+   content: string
+   modelCount: number
+@@ -7,7 +8,7 @@
+ const DEFAULT_CODEX_CLIENT_VERSION = '0.158.0'
+ 
+ function normalizeCodexBaseUrl(baseUrl: string): string {
+-  const fallback = typeof window !== 'undefined' ? window.location.origin : ''
++  const fallback = typeof window !== 'undefined' ? appOrigin() : ''
+   const value = (baseUrl || fallback).trim().replace(/\/+$/, '')
+   if (!value) return '/v1'
+   return /\/v1$/i.test(value) ? value : `${value}/v1`
+--- a/frontend/src/api/url.ts
++++ b/frontend/src/api/url.ts
+@@ -1,3 +1,4 @@
++import { appPath } from '@/utils/appBase'
+ const DEFAULT_API_BASE_URL = '/api/v1'
+ const API_BASE_URL = normalizeAPIBaseURL(import.meta.env.VITE_API_BASE_URL)
+ 
+@@ -11,7 +12,7 @@
+   if (/^[a-z][a-z\d+.-]*:\/\//i.test(withoutTrailingSlash) || withoutTrailingSlash.startsWith('//')) {
+     return withoutTrailingSlash
+   }
+-  return normalizePath(withoutTrailingSlash)
++  return appPath(normalizePath(withoutTrailingSlash))
+ }
+ 
+ export function getAPIBaseURL(): string {
+@@ -36,8 +37,8 @@
+       typeof window === 'undefined'
+         ? new URL(getAPIBaseURL()).origin
+         : new URL(getAPIBaseURL(), window.location.origin).origin
+-    return `${origin}${suffix}`
++    return `${origin}${appPath(suffix)}`
+   } catch {
+-    return suffix
++    return appPath(suffix)
+   }
+ }
+--- a/frontend/src/components/admin/AdminComplianceDialog.vue
++++ b/frontend/src/components/admin/AdminComplianceDialog.vue
+@@ -97,6 +97,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { computed, ref, watch } from 'vue'
+ import { marked } from 'marked'
+ import DOMPurify from 'dompurify'
+@@ -179,7 +180,7 @@
+ 
+ async function logout(): Promise<void> {
+   await authStore.logout()
+-  window.location.href = '/login'
++  window.location.href = appPath('/login')
+ }
+ </script>
+ 
+--- a/frontend/src/components/keys/UseKeyModal.vue
++++ b/frontend/src/components/keys/UseKeyModal.vue
+@@ -267,6 +267,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { ref, computed, h, watch, type Component } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { saveAs } from 'file-saver'
+@@ -736,7 +737,7 @@
+ // Syntax highlighting helpers
+ // Generate file configs based on platform and active tab
+ const currentFiles = computed((): FileConfig[] => {
+-  const baseUrl = props.baseUrl || window.location.origin
++  const baseUrl = props.baseUrl || appOrigin()
+   const apiKey = props.apiKey
+   const baseRoot = baseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '')
+   const ensureV1 = (value: string) => {
+--- a/frontend/src/components/layout/AppSidebar.vue
++++ b/frontend/src/components/layout/AppSidebar.vue
+@@ -14,7 +14,7 @@
+         class="sidebar-logo flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl shadow-glow transition-opacity hover:opacity-80"
+         @click="handleMenuItemClick(homePath)"
+       >
+-        <img v-if="settingsLoaded" :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
++        <img v-if="settingsLoaded" :src="siteLogo || appPath('/logo.svg')" alt="Logo" class="h-full w-full object-contain" />
+       </router-link>
+       <div class="sidebar-brand" :class="{ 'sidebar-brand-collapsed': sidebarCollapsed }" :aria-hidden="sidebarCollapsed ? 'true' : 'false'">
+         <router-link
+@@ -188,6 +188,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+ import { useRoute, useRouter } from 'vue-router'
+ import { useI18n } from 'vue-i18n'
+--- a/frontend/src/components/layout/AuthLayout.vue
++++ b/frontend/src/components/layout/AuthLayout.vue
+@@ -33,7 +33,7 @@
+           <div
+             class="mb-4 inline-flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl shadow-lg shadow-primary-500/30"
+           >
+-            <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
++            <img :src="siteLogo || appPath('/logo.svg')" alt="Logo" class="h-full w-full object-contain" />
+           </div>
+           <h1 class="text-gradient mb-2 text-3xl font-bold">
+             {{ siteName }}
+@@ -63,6 +63,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { computed, onMounted } from 'vue'
+ import { useAppStore } from '@/stores'
+ import { sanitizeUrl } from '@/utils/url'
+--- a/frontend/src/components/modelPlaza/PlazaNavBar.vue
++++ b/frontend/src/components/modelPlaza/PlazaNavBar.vue
+@@ -9,7 +9,7 @@
+           <span
+             class="flex h-9 w-9 flex-shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-200 dark:bg-dark-800 dark:ring-dark-700"
+           >
+-            <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
++            <img :src="siteLogo || appPath('/logo.svg')" alt="Logo" class="h-full w-full object-contain" />
+           </span>
+           <span class="truncate text-base font-semibold text-gray-950 dark:text-white">
+             {{ siteName }}
+@@ -41,6 +41,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { computed } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { sanitizeUrl } from '@/utils/url'
+--- a/frontend/src/components/payment/PaymentProviderDialog.vue
++++ b/frontend/src/components/payment/PaymentProviderDialog.vue
+@@ -305,6 +305,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { reactive, computed, ref } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import BaseDialog from '@/components/common/BaseDialog.vue'
+@@ -413,7 +414,7 @@
+ const easyPayCustomMethods = reactive<EasyPayCustomMethod[]>([])
+ 
+ // --- Computed ---
+-const defaultBaseUrl = typeof window !== 'undefined' ? window.location.origin : ''
++const defaultBaseUrl = typeof window !== 'undefined' ? appOrigin() : ''
+ 
+ const providerWebhookHintMap: Record<string, string> = {
+   stripe: 'admin.settings.payment.stripeWebhookHint',
+--- a/frontend/src/components/payment/StripePaymentInline.vue
++++ b/frontend/src/components/payment/StripePaymentInline.vue
+@@ -64,6 +64,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { computed, ref, onMounted, nextTick } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { useRouter } from 'vue-router'
+@@ -179,7 +180,7 @@
+     const { error: stripeError } = await stripeInstance.confirmPayment({
+       elements: elementsInstance,
+       confirmParams: {
+-        return_url: window.location.origin + '/payment/result?order_id=' + props.orderId + '&status=success',
++        return_url: appOrigin() + '/payment/result?order_id=' + props.orderId + '&status=success',
+       },
+       redirect: 'if_required',
+     })
+--- a/frontend/src/router/index.ts
++++ b/frontend/src/router/index.ts
+@@ -3,6 +3,7 @@
+  * Defines all application routes with lazy loading and navigation guards
+  */
+ 
++import { getAppBase } from '@/utils/appBase'
+ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+ import { useAuthStore } from '@/stores/auth'
+ import { useAppStore } from '@/stores/app'
+@@ -730,7 +731,7 @@
+  * Create router instance
+  */
+ const router = createRouter({
+-  history: createWebHistory(import.meta.env.BASE_URL),
++  history: createWebHistory(getAppBase()),
+   routes,
+   scrollBehavior(_to, _from, savedPosition) {
+     // Scroll to saved position when using browser back/forward
+--- a/frontend/src/stores/app.ts
++++ b/frontend/src/stores/app.ts
+@@ -1,3 +1,4 @@
++import { appPath, appOrigin } from '@/utils/appBase'
+ /**
+  * Application State Store
+  * Manages global UI state including sidebar, loading indicators, and toast notifications
+@@ -295,10 +296,10 @@
+     }
+     cachedPublicSettings.value = config
+     siteName.value = config.site_name || 'Sub2API'
+-    siteLogo.value = config.site_logo || ''
++    siteLogo.value = appPath(config.site_logo || '')
+     siteVersion.value = config.version || ''
+     contactInfo.value = config.contact_info || ''
+-    apiBaseUrl.value = config.api_base_url || ''
++    apiBaseUrl.value = config.api_base_url || appOrigin()
+     docUrl.value = config.doc_url || ''
+     publicSettingsLoaded.value = true
+   }
+--- /dev/null
++++ b/frontend/src/utils/appBase.ts
+@@ -0,0 +1,17 @@
++/** Public mount path supplied by the server's runtime <base> tag. */
++const configuredBase = typeof document === 'undefined' ? '' : document.querySelector('base')?.getAttribute('href') || ''
++const appBase = configuredBase.startsWith('/') && !configuredBase.startsWith('//') ? configuredBase.replace(/\/+$/, '') : ''
++
++export function getAppBase(): string {
++  return appBase || '/'
++}
++export function appPath(path: string): string {
++  if (!appBase || !path.startsWith('/') || path.startsWith('//') || path === appBase || path.startsWith(`${appBase}/`)) return path
++  return `${appBase}${path}`
++}
++export function stripAppBase(path: string): string {
++  return appBase && (path === appBase || path.startsWith(`${appBase}/`)) ? path.slice(appBase.length) || '/' : path
++}
++export function appOrigin(): string {
++  return `${window.location.origin}${appBase}`
++}
+--- a/frontend/src/views/HomeView.vue
++++ b/frontend/src/views/HomeView.vue
+@@ -22,7 +22,7 @@
+       <nav class="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 sm:gap-4">
+         <div class="flex min-w-0 flex-1 items-center gap-3">
+           <img
+-            :src="siteLogo || '/logo.svg'"
++            :src="siteLogo || appPath('/logo.svg')"
+             alt="Logo"
+             class="h-9 w-9 shrink-0 rounded-lg object-contain"
+           />
+@@ -70,7 +70,7 @@
+     <main class="flex min-w-0 flex-1 items-center justify-center px-4 py-16 sm:px-6">
+       <div class="min-w-0 max-w-2xl text-center">
+         <img
+-          :src="siteLogo || '/logo.svg'"
++          :src="siteLogo || appPath('/logo.svg')"
+           alt="Logo"
+           class="mx-auto mb-6 h-20 w-20 rounded-2xl object-contain"
+         />
+@@ -120,7 +120,7 @@
+         <!-- Logo -->
+         <div class="flex items-center">
+           <div class="h-10 w-10 overflow-hidden rounded-xl shadow-md">
+-            <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
++            <img :src="siteLogo || appPath('/logo.svg')" alt="Logo" class="h-full w-full object-contain" />
+           </div>
+         </div>
+ 
+@@ -494,6 +494,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { ref, computed, onMounted } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { useAuthStore, useAppStore } from '@/stores'
+--- a/frontend/src/views/KeyUsageView.vue
++++ b/frontend/src/views/KeyUsageView.vue
+@@ -5,7 +5,7 @@
+       <nav class="mx-auto flex max-w-6xl items-center justify-between">
+         <router-link to="/home" class="flex items-center gap-3">
+           <div class="h-10 w-10 overflow-hidden rounded-xl shadow-md">
+-            <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
++            <img :src="siteLogo || appPath('/logo.svg')" alt="Logo" class="h-full w-full object-contain" />
+           </div>
+           <span class="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">{{ siteName }}</span>
+         </router-link>
+@@ -417,6 +417,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { useAppStore } from '@/stores'
+--- a/frontend/src/views/admin/PromoCodesView.vue
++++ b/frontend/src/views/admin/PromoCodesView.vue
+@@ -386,6 +386,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { useAppStore } from '@/stores/app'
+@@ -665,7 +666,7 @@
+ 
+ // Copy Register Link
+ const copyRegisterLink = async (code: PromoCode) => {
+-  const baseUrl = window.location.origin
++  const baseUrl = appOrigin()
+   const registerLink = `${baseUrl}/register?promo=${encodeURIComponent(code.code)}`
+ 
+   try {
+--- a/frontend/src/views/admin/SettingsView.vue
++++ b/frontend/src/views/admin/SettingsView.vue
+@@ -8975,6 +8975,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { ref, reactive, computed, onMounted, watch } from "vue";
+ import { listPlatformIds } from "@/constants/platformCatalog";
+ import { useI18n } from "vue-i18n";
+@@ -10711,7 +10712,7 @@
+ };
+ 
+ const currentOrigin =
+-  typeof window !== "undefined" ? window.location.origin : "";
++  typeof window !== "undefined" ? appOrigin() : "";
+ 
+ function buildApiCallbackUrl(path: string): string {
+   const base = (form.api_base_url || currentOrigin).replace(/\/+$/, "");
+--- a/frontend/src/views/public/LegalDocumentView.vue
++++ b/frontend/src/views/public/LegalDocumentView.vue
+@@ -5,7 +5,7 @@
+         <RouterLink to="/home" class="flex min-w-0 items-center gap-3">
+           <template v-if="settings">
+             <span class="flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-200 dark:bg-dark-800 dark:ring-dark-700">
+-              <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
++              <img :src="siteLogo || appPath('/logo.svg')" alt="Logo" class="h-full w-full object-contain" />
+             </span>
+             <span class="truncate text-base font-semibold text-gray-950 dark:text-white">
+               {{ siteName }}
+@@ -90,6 +90,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { computed, onMounted, ref } from 'vue'
+ import { useRoute } from 'vue-router'
+ import { marked } from 'marked'
+--- a/frontend/src/views/setup/SetupWizardView.vue
++++ b/frontend/src/views/setup/SetupWizardView.vue
+@@ -499,6 +499,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { ref, reactive, computed } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { testDatabase, testRedis, install, type InstallRequest } from '@/api/setup'
+@@ -667,7 +668,7 @@
+           serviceReady.value = true
+           // Redirect to login page after a short delay
+           setTimeout(() => {
+-            window.location.href = '/login'
++            window.location.href = appPath('/login')
+           }, 1500)
+           return
+         }
+--- a/frontend/src/views/user/AffiliateView.vue
++++ b/frontend/src/views/user/AffiliateView.vue
+@@ -140,6 +140,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { computed, onMounted, ref } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import AppLayout from '@/components/layout/AppLayout.vue'
+@@ -164,7 +165,7 @@
+ const inviteLink = computed(() => {
+   if (!detail.value) return ''
+   if (typeof window === 'undefined') return `/register?aff=${encodeURIComponent(detail.value.aff_code)}`
+-  return `${window.location.origin}/register?aff=${encodeURIComponent(detail.value.aff_code)}`
++  return `${appOrigin()}/register?aff=${encodeURIComponent(detail.value.aff_code)}`
+ })
+ 
+ // Rebate rate is a percentage in the range [0, 100]; backend already clamps it.
+--- a/frontend/src/views/user/AirwallexPaymentView.vue
++++ b/frontend/src/views/user/AirwallexPaymentView.vue
+@@ -25,6 +25,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appPath } from '@/utils/appBase'
+ import { onMounted, onUnmounted, ref } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { useRoute, useRouter } from 'vue-router'
+@@ -53,7 +54,7 @@
+ }
+ 
+ function buildSuccessUrl(snapshot: PaymentRecoverySnapshot): string {
+-  const url = new URL('/payment/result', window.location.origin)
++  const url = new URL(appPath('/payment/result'), window.location.origin)
+   const orderId = queryString('order_id')
+   const outTradeNo = queryString('out_trade_no')
+   const resumeToken = queryString('resume_token')
+--- a/frontend/src/views/user/BatchImageGuideView.vue
++++ b/frontend/src/views/user/BatchImageGuideView.vue
+@@ -752,6 +752,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import AppLayout from '@/components/layout/AppLayout.vue'
+@@ -1030,7 +1031,7 @@
+ const endpointBase = computed(() => {
+   const configured = appStore.apiBaseUrl?.trim()
+   if (configured) return configured.replace(/\/+$/, '')
+-  if (typeof window !== 'undefined') return window.location.origin.replace(/\/+$/, '')
++  if (typeof window !== 'undefined') return appOrigin().replace(/\/+$/, '')
+   return '<你的 Sub2API API 端点>'
+ })
+ 
+--- a/frontend/src/views/user/KeysView.vue
++++ b/frontend/src/views/user/KeysView.vue
+@@ -1199,6 +1199,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ 	import { ref, reactive, computed, watch, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
+ 	import { useI18n } from 'vue-i18n'
+ 	import { useAppStore } from '@/stores/app'
+@@ -2024,7 +2025,7 @@
+ }
+ 
+ const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType) => {
+-  const baseUrl = publicSettings.value?.api_base_url || window.location.origin
++  const baseUrl = publicSettings.value?.api_base_url || appOrigin()
+   const platform = row.group?.platform || 'anthropic'
+ 
+   const usageScript = CC_SWITCH_USAGE_SCRIPT
+--- a/frontend/src/views/user/StripePaymentView.vue
++++ b/frontend/src/views/user/StripePaymentView.vue
+@@ -94,6 +94,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { useRoute, useRouter } from 'vue-router'
+@@ -204,7 +205,7 @@
+ 
+ async function confirmAlipay(stripe: Stripe, clientSecret: string, orderId: number) {
+   redirecting.value = true
+-  const returnUrl = window.location.origin + '/payment/result?order_id=' + orderId + '&status=success'
++  const returnUrl = appOrigin() + '/payment/result?order_id=' + orderId + '&status=success'
+   const { error } = await stripe.confirmAlipayPayment(clientSecret, { return_url: returnUrl })
+   if (error) {
+     redirecting.value = false
+@@ -263,7 +264,7 @@
+     const { error } = await stripeInstance.confirmPayment({
+       elements: elementsInstance,
+       confirmParams: {
+-        return_url: window.location.origin + '/payment/result?order_id=' + route.query.order_id + '&status=success',
++        return_url: appOrigin() + '/payment/result?order_id=' + route.query.order_id + '&status=success',
+       },
+       redirect: 'if_required',
+     })
+--- a/frontend/src/views/user/StripePopupView.vue
++++ b/frontend/src/views/user/StripePopupView.vue
+@@ -53,6 +53,7 @@
+ </template>
+ 
+ <script setup lang="ts">
++import { appOrigin } from '@/utils/appBase'
+ import { computed, ref, onMounted, onUnmounted } from 'vue'
+ import { useI18n } from 'vue-i18n'
+ import { useRoute } from 'vue-router'
+@@ -141,7 +142,7 @@
+     const stripe = await loadStripe(publishableKey)
+     if (!stripe) { error.value = t('payment.stripeLoadFailed'); return }
+ 
+-    const returnUrl = window.location.origin + '/payment/result?order_id=' + orderId + '&status=success'
++    const returnUrl = appOrigin() + '/payment/result?order_id=' + orderId + '&status=success'
+ 
+     if (method === 'alipay') {
+       // Alipay: redirect this popup to Alipay payment page
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -84,6 +84,7 @@
+   const devPort = Number(env.VITE_DEV_PORT || 3000)
+ 
+   return {
++    base: './',
+     plugins: [
+       vue(),
+       checker({

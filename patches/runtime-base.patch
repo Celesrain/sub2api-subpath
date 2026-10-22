@@ -1,0 +1,229 @@
+--- /dev/null
++++ b/backend/internal/web/app_base.go
+@@ -0,0 +1,42 @@
++package web
++
++import (
++	"bytes"
++	"fmt"
++	"regexp"
++	"strings"
++)
++
++var appBaseSegment = regexp.MustCompile(`^[A-Za-z0-9_~-][A-Za-z0-9._~-]*$`)
++
++// normalizeAppBase accepts a same-origin mount path, never a URL or dot segment.
++func normalizeAppBase(value string) (string, error) {
++	value = strings.TrimSpace(value)
++	if value == "" || value == "/" {
++		return "/", nil
++	}
++	invalid := fmt.Errorf("APP_BASE_PATH must be / or an absolute path of URL-safe segments")
++	if !strings.HasPrefix(value, "/") {
++		return "", invalid
++	}
++	value = strings.TrimSuffix(value, "/")
++	for _, segment := range strings.Split(value[1:], "/") {
++		if !appBaseSegment.MatchString(segment) {
++			return "", invalid
++		}
++	}
++	return value + "/", nil
++}
++
++// injectAppBase runs before caching and branding, so deep links and fallback HTML agree.
++func injectAppBase(content []byte, base string) []byte {
++	return bytes.Replace(content, []byte("<head>"), []byte(`<head><base href="`+base+`">`), 1)
++}
++
++func appBaseLocalURL(value, base string) string {
++	prefix := strings.TrimSuffix(base, "/")
++	if prefix == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || value == prefix || strings.HasPrefix(value, prefix+"/") {
++		return value
++	}
++	return prefix + value
++}
+--- /dev/null
++++ b/backend/internal/web/app_base_test.go
+@@ -0,0 +1,36 @@
++package web
++
++import (
++	"bytes"
++	"testing"
++)
++
++func TestNormalizeAppBase(t *testing.T) {
++	for value, want := range map[string]string{"": "/", "/": "/", "/s2a": "/s2a/", "/tools/ai/": "/tools/ai/", "/v1.2/_app": "/v1.2/_app/"} {
++		got, err := normalizeAppBase(value)
++		if err != nil || got != want {
++			t.Fatalf("%q: got %q, %v", value, got, err)
++		}
++	}
++	for _, value := range []string{"relative", "//evil.test", "/a//b", "/a/../b", "/a/./b", "/a?x=1", "/a#b", "/a%2fb", "/a\\b", "/a\"b", "/a/\nb"} {
++		if _, err := normalizeAppBase(value); err == nil {
++			t.Errorf("accepted invalid mount %q", value)
++		}
++	}
++}
++
++func TestInjectAppBase(t *testing.T) {
++	html := []byte(`<html><head><script src="./assets/main.js"></script></head></html>`)
++	result := injectAppBase(html, "/tools/ai/")
++	if !bytes.Contains(result, []byte(`<head><base href="/tools/ai/"><script`)) {
++		t.Fatal(string(result))
++	}
++}
++
++func TestAppBaseLocalURL(t *testing.T) {
++	for value, want := range map[string]string{"/logo.svg": "/tools/ai/logo.svg", "/tools/ai/logo.svg": "/tools/ai/logo.svg", "https://cdn.test/logo.svg": "https://cdn.test/logo.svg", "//cdn.test/logo.svg": "//cdn.test/logo.svg", "data:image/svg+xml,abc": "data:image/svg+xml,abc"} {
++		if got := appBaseLocalURL(value, "/tools/ai/"); got != want {
++			t.Errorf("%q -> %q, want %q", value, got, want)
++		}
++	}
++}
+--- /dev/null
++++ b/backend/internal/web/app_base_embed_test.go
+@@ -0,0 +1,58 @@
++//go:build embed
++
++package web
++
++import (
++	"errors"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++)
++
++func TestFrontendRuntimeBase(t *testing.T) {
++	t.Setenv("APP_BASE_PATH", "/tools/ai/")
++	provider := &mockSettingsProvider{settings: map[string]string{"site_logo": "/logo.svg"}}
++	server, err := NewFrontendServer(provider)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, fallback := range []bool{false, false, true} {
++		if fallback {
++			server.InvalidateCache()
++			provider.err = errors.New("synthetic settings failure")
++		}
++		w := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(w)
++		c.Request = httptest.NewRequest("GET", "/admin/dashboard", nil)
++		server.serveIndexHTML(c)
++		body := w.Body.String()
++		if w.Code != 200 || !strings.Contains(body, `<base href="/tools/ai/">`) {
++			t.Fatalf("runtime base missing, status %d", w.Code)
++		}
++		if !fallback && !strings.Contains(body, `href="/tools/ai/logo.svg"`) {
++			t.Fatal("custom local favicon lost its mount prefix")
++		}
++	}
++}
++
++func TestFrontendRejectsInvalidRuntimeBase(t *testing.T) {
++	t.Setenv("APP_BASE_PATH", "//untrusted.test/")
++	if _, err := NewFrontendServer(&mockSettingsProvider{}); err == nil {
++		t.Fatal("invalid APP_BASE_PATH was accepted")
++	}
++}
++
++func TestLegacyFrontendRuntimeBase(t *testing.T) {
++	t.Setenv("APP_BASE_PATH", "/tools/ai/")
++	for _, path := range []string{"/", "/index.html", "/login"} {
++		w := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(w)
++		c.Request = httptest.NewRequest("GET", path, nil)
++		ServeEmbeddedFrontend()(c)
++		if w.Code != 200 || !strings.Contains(w.Body.String(), `<base href="/tools/ai/">`) {
++			t.Fatalf("legacy route %s lost runtime base", path)
++		}
++	}
++}
+--- a/backend/internal/web/embed_on.go
++++ b/backend/internal/web/embed_on.go
+@@ -42,6 +42,7 @@
+ 	cache       *HTMLCache
+ 	settings    PublicSettingsProvider
+ 	overrideDir string // local file override directory
++	appBasePath string // configured public mount, independent of internal API routes
+ }
+ 
+ // NewFrontendServer creates a new frontend server with settings injection
+@@ -62,6 +63,12 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
++
++	appBasePath, err := normalizeAppBase(os.Getenv("APP_BASE_PATH"))
++	if err != nil {
++		return nil, err
++	}
++	baseHTML = injectAppBase(baseHTML, appBasePath)
+ 
+ 	cache := NewHTMLCache()
+ 	cache.SetBaseHTML(baseHTML)
+@@ -70,6 +77,7 @@
+ 		distFS:      distFS,
+ 		fileServer:  http.FileServer(http.FS(distFS)),
+ 		baseHTML:    baseHTML,
++		appBasePath: appBasePath,
+ 		cache:       cache,
+ 		settings:    settingsProvider,
+ 		overrideDir: filepath.Join("data", "public"),
+@@ -212,13 +220,13 @@
+ 
+ 	// Apply custom branding before the browser paints the static defaults.
+ 	result = injectSiteTitle(result, settingsJSON)
+-	result = injectSiteFavicon(result, settingsJSON)
++	result = injectSiteFavicon(result, settingsJSON, s.appBasePath)
+ 
+ 	return result
+ }
+ 
+ // injectSiteFavicon replaces the static favicon with a configured, browser-safe image URL.
+-func injectSiteFavicon(html, settingsJSON []byte) []byte {
++func injectSiteFavicon(html, settingsJSON []byte, basePaths ...string) []byte {
+ 	var cfg struct {
+ 		SiteLogo string `json:"site_logo"`
+ 	}
+@@ -227,6 +235,9 @@
+ 	}
+ 
+ 	logoURL := safeImageURL(cfg.SiteLogo)
++	if len(basePaths) > 0 {
++		logoURL = appBaseLocalURL(logoURL, basePaths[0])
++	}
+ 	if logoURL == "" {
+ 		return html
+ 	}
+@@ -319,6 +330,11 @@
+ 		cleanPath := strings.TrimPrefix(path, "/")
+ 		if cleanPath == "" {
+ 			cleanPath = "index.html"
++		}
++
++		if cleanPath == "index.html" {
++			serveIndexHTML(c, distFS)
++			return
+ 		}
+ 
+ 		if file, err := distFS.Open(cleanPath); err == nil {
+@@ -401,7 +417,13 @@
+ 		return
+ 	}
+ 
+-	c.Data(http.StatusOK, "text/html; charset=utf-8", content)
++	base, err := normalizeAppBase(os.Getenv("APP_BASE_PATH"))
++	if err != nil {
++		c.String(http.StatusInternalServerError, "Invalid APP_BASE_PATH")
++		c.Abort()
++		return
++	}
++	c.Data(http.StatusOK, "text/html; charset=utf-8", injectAppBase(content, base))
+ 	c.Abort()
+ }
+ 
