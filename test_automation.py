@@ -178,20 +178,44 @@ class PublicationTests(unittest.TestCase):
                 ci.publish()
             run.assert_not_called()
 
-    def test_success_publishes_only_unique_tag_and_creates_new_release(self):
+    def test_success_publishes_new_version_and_matching_latest(self):
         registry, github = Mock(), Mock()
-        registry.manifest_digest.side_effect = [None, 'sha256:' + 'c' * 64]
-        github.request.side_effect = [None, {'html_url': 'https://github.com/owner/repo/releases/tag/new'}]
+        registry.manifest_digest.side_effect = [None, 'sha256:' + 'c' * 64, 'sha256:' + 'c' * 64]
+        github.request.side_effect = [None, None, {'id': 123, 'html_url': 'https://github.com/owner/repo/releases/tag/new'}, {}]
         image = json.dumps([{'Id': self.record['image_id']}]).encode()
         with patch.object(ci, 'Registry', return_value=registry), patch.object(ci, 'GitHub', return_value=github), \
              patch.object(ci, 'run') as run, patch.object(ci.subprocess, 'check_output', return_value=image):
             ci.publish()
         pushes = [call.args[0] for call in run.call_args_list if call.args[0][:2] == ['docker', 'push']]
-        self.assertEqual(pushes, [['docker', 'push', 'ghcr.io/celesrain/sub2api-subpath:' + self.record['version']]])
-        create = github.request.call_args_list[-1]
+        self.assertEqual(pushes, [['docker', 'push', 'ghcr.io/celesrain/sub2api-subpath:' + self.record['version']],
+                                 ['docker', 'push', 'ghcr.io/celesrain/sub2api-subpath:latest']])
+        create = github.request.call_args_list[-2]
         self.assertEqual(create.kwargs['data']['tag_name'], 'build-' + self.record['version'])
         self.assertEqual(create.kwargs['data']['make_latest'], 'false')
+        self.assertEqual(github.request.call_args.kwargs, {'data': {'make_latest': 'true'}, 'method': 'PATCH'})
+        self.assertTrue(json.loads((self.dist / 'published.json').read_text())['latest_promoted'])
         self.assertTrue((self.dist / 'published.json').exists())
+
+    def test_older_upstream_build_keeps_latest_unchanged(self):
+        previous = {**self.record, 'upstream_ref': 'v0.2.18', 'build_run_id': '1'}
+        github = Mock()
+        github.request.return_value = {'body': '```json\n' + json.dumps(previous) + '\n```'}
+        self.assertFalse(ci.may_advance_latest(self.record, github))
+
+    def test_latest_checks_branch_prerelease_and_lock_high_water(self):
+        github = Mock()
+        with patch.dict(os.environ, {'GITHUB_REF': 'refs/heads/test'}):
+            self.assertFalse(ci.may_advance_latest(self.record, github))
+        self.assertFalse(ci.may_advance_latest({**self.record, 'upstream_ref': 'v0.2.18-rc1'}, github))
+        (self.root / 'upstream.lock.json').write_text(json.dumps({**LOCK, 'ref': 'v0.2.18'}))
+        self.assertFalse(ci.may_advance_latest(self.record, github))
+        github.request.assert_not_called()
+
+    def test_unknown_latest_release_provenance_is_not_overwritten(self):
+        github = Mock()
+        github.request.return_value = {'body': 'unverified release'}
+        with self.assertRaises(ValueError):
+            ci.may_advance_latest(self.record, github)
 
     def test_failed_build_has_no_publication_to_promote(self):
         with patch.object(ci, 'GitHub') as github, self.assertRaises(FileNotFoundError):

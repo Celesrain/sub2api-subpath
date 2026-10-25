@@ -29,10 +29,13 @@ upstream release and builder commit. Local builds use a UTC timestamp and random
 suffix instead. The unique version is embedded into the application and OCI labels.
 `build.py --image` accepts a repository without a tag; the unique tag is appended.
 
-Only that unique tag is pushed to `ghcr.io/celesrain/sub2api-subpath`.
-The publisher refuses a pre-existing image version or build release and does not
-update `latest`, commit-only tags or bare upstream-version tags. Existing legacy
-tags remain in place and are no longer advanced by this workflow.
+That unique tag is pushed to `ghcr.io/celesrain/sub2api-subpath` and never replaced.
+The publisher refuses a pre-existing image version or build release. It also
+updates the movable `latest` image alias and GitHub Latest release when the new
+build is a newer verified stable build from `main`. Older upstream rebuilds,
+older patch revisions, prereleases and branch builds cannot move Latest backwards.
+Commit-only tags and bare upstream-version tags remain unchanged. Updating the
+Latest pointers does not delete or replace any older uniquely versioned image.
 
 Each publication also creates a separate `build-<version>` GitHub release with
 the image digest, upstream and recipe commits, source/patch checksums, tested

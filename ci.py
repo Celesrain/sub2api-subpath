@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
-from automation import GitHub, Registry, build_version, require_new_publication, go_image
+from automation import GitHub, Registry, build_version, require_new_publication, go_image, STABLE_REF
 from sync_upstream import stable_version
 
 ROOT = Path(__file__).resolve().parent
@@ -75,6 +75,26 @@ def export():
     print(json.dumps(record))
 
 
+def may_advance_latest(record, github):
+    """Only a newer verified stable build from main may move the latest pointers."""
+    if os.environ.get('GITHUB_REF') != 'refs/heads/main' or not STABLE_REF.fullmatch(record['upstream_ref']):
+        return False
+    locked = json.loads((ROOT / 'upstream.lock.json').read_text(encoding='utf8'))
+    if stable_version(record['upstream_ref']) < stable_version(locked['ref']):
+        return False
+    latest = github.request('/repos/' + os.environ['GITHUB_REPOSITORY'] + '/releases/latest', missing_ok=True)
+    if latest is None:
+        return True
+    match = re.search(r'```json\s*\n([\s\S]*?)\n```', latest.get('body', ''))
+    if not match:
+        raise ValueError('Latest release has no verifiable build provenance; refusing to replace its pointer')
+    previous = json.loads(match[1])
+    def rank(item):
+        return (stable_version(item['upstream_ref']), int(item['patch_revision']),
+                int(item['build_run_id']), int(item['build_run_attempt']))
+    return rank(record) > rank(previous)
+
+
 def publish():
     record = json.loads((DIST / 'build.json').read_text(encoding='utf8'))
     archive = DIST / 'image.tar.gz'
@@ -104,6 +124,7 @@ def publish():
     run(['docker', 'push', reference])
     digest = registry.manifest_digest(record['version'])
     assert digest is not None, 'Published image was not found in the registry'
+    advance_latest = may_advance_latest(record, github)
     receipt = {**record, 'published_image': reference, 'manifest_digest': digest,
                'image_by_digest': 'ghcr.io/' + repository + '@' + digest,
                'workflow_run': 'https://github.com/' + repository + '/actions/runs/' + record['build_run_id']}
@@ -115,9 +136,20 @@ def publish():
                 '`\n\nBuild provenance:\n```json\n' + json.dumps(receipt, indent=2) + '\n```',
     })
     receipt['release_url'] = release['html_url']
+    receipt['latest_promoted'] = False
+    if advance_latest:
+        alias = 'ghcr.io/' + repository + ':latest'
+        run(['docker', 'tag', record['image_reference'], alias])
+        run(['docker', 'push', alias])
+        assert registry.manifest_digest('latest') == digest, 'Latest differs from the verified version'
+        github.request('/repos/' + repository + '/releases/' + str(release['id']),
+                       data={'make_latest': 'true'}, method='PATCH')
+        receipt['latest_promoted'] = True
     (DIST / 'published.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf8')
-    summary('Published a new build without overwriting older tags:\n\n- `' + reference +
+    summary('Published a new build without overwriting version tags:\n\n- `' + reference +
             '`\n- `' + receipt['image_by_digest'] + '`\n- ' + receipt['release_url'])
+    if receipt['latest_promoted']:
+        summary('Updated the GHCR `latest` alias and GitHub Latest release to this verified build.')
     print(json.dumps({'published': reference, 'digest': digest, 'release': receipt['release_url']}))
 
 
