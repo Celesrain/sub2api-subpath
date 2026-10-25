@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
-from automation import GitHub, Registry, build_version, require_new_publication
+from automation import GitHub, Registry, build_version, require_new_publication, go_image
 from sync_upstream import stable_version
 
 ROOT = Path(__file__).resolve().parent
@@ -63,6 +63,7 @@ def export():
               'source_repository': lock['builder_repository'], 'source_revision': os.environ.get('GITHUB_SHA', 'local'),
               'upstream_ref': result['upstream_ref'], 'upstream_revision': result['upstream_revision'],
               'source_sha256': result['source_sha256'], 'patch_revision': result['patch_revision'],
+              'images': result['images'],
               'build_run_id': result['build_run_id'], 'build_run_attempt': result['build_run_attempt'],
               'lock_sha256': hashlib.sha256(lock_bytes).hexdigest(),
               'lock_changed': os.environ.get('UPSTREAM_LOCK_CHANGED') == 'true',
@@ -133,8 +134,13 @@ def promote_lock():
     assert hashlib.sha256(before_bytes).hexdigest() == receipt['base_lock_sha256']
     assert hashlib.sha256(candidate_bytes).hexdigest() == receipt['lock_sha256']
     before, candidate = json.loads(before_bytes), json.loads(candidate_bytes)
-    mutable = {'ref', 'revision', 'commit_date', 'source_sha256'}
+    mutable = {'ref', 'revision', 'commit_date', 'source_sha256', 'images'}
     assert {k: v for k, v in before.items() if k not in mutable} == {k: v for k, v in candidate.items() if k not in mutable}
+    old_go, old_pin, old_version = go_image(before['images'])
+    new_go, new_pin, new_version = go_image(candidate['images'])
+    assert {k: v for k, v in before['images'].items() if k != old_go} == {k: v for k, v in candidate['images'].items() if k != new_go}
+    assert (new_go, new_pin) == (old_go, old_pin) or new_version > old_version
+    assert candidate['images'] == receipt['images']
     assert stable_version(candidate['ref']) > stable_version(before['ref'])
     assert candidate['revision'] == receipt['upstream_revision']
     assert candidate['ref'] == receipt['upstream_ref']

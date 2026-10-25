@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
-from automation import build_version
+from automation import build_version, go_image, go_requirement
 
 ROOT = Path(__file__).resolve().parent
 
@@ -128,6 +128,9 @@ def main():
     artifacts = ROOT / '.artifacts'
     artifacts.mkdir(exist_ok=True)
     context, manifest = prepare(lock, ref, work, args.source_archive)
+    compiler_key, compiler, compiler_version = go_image(lock['images'])
+    if compiler_version < go_requirement((context / 'backend/go.mod').read_text(encoding='utf8')):
+        raise ValueError('Pinned Go image is older than the upstream module requirement; resolve the upstream lock first')
     manifest.update({'local_image': image, 'platform': 'linux/amd64', 'build_version': version,
                      'build_run_id': os.environ.get('GITHUB_RUN_ID'),
                      'build_run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT')})
@@ -145,7 +148,7 @@ def main():
              '--build-arg', 'DATE=' + manifest['commit_date'],
              '--build-arg', 'GOPROXY=https://proxy.golang.org,direct',
              '--build-arg', 'GOSUMDB=sum.golang.org']
-    for argument, source in [('NODE_IMAGE', 'node:24-alpine'), ('GOLANG_IMAGE', 'golang:1.27.2-alpine'),
+    for argument, source in [('NODE_IMAGE', 'node:24-alpine'), ('GOLANG_IMAGE', compiler_key),
                              ('ALPINE_IMAGE', 'alpine:3.21'), ('POSTGRES_IMAGE', 'postgres:18-alpine')]:
         build += ['--build-arg', argument + '=' + lock['images'][source]]
     for key, value in {'org.opencontainers.image.source': 'https://github.com/' + lock['builder_repository'],

@@ -36,6 +36,39 @@ def build_version(ref, patch_revision, environ=None):
     return version
 
 
+def go_requirement(text):
+    requirements = re.findall(r'(?m)^(?:go\s+|toolchain\s+go)(\d+)\.(\d+)(?:\.(\d+))?\s*$', text)
+    if not requirements:
+        raise ValueError('No supported Go version requirement found')
+    return max(tuple(int(part or '0') for part in row) for row in requirements)
+
+
+def go_image(images):
+    entries = [(key, value) for key, value in images.items() if key.startswith('golang:')]
+    if len(entries) != 1:
+        raise ValueError('Exactly one pinned Go image is required')
+    key, value = entries[0]
+    match = re.fullmatch(r'golang:(\d+)\.(\d+)\.(\d+)-alpine', key)
+    if not match or not re.fullmatch(re.escape(key) + r'@sha256:[a-f0-9]{64}', value):
+        raise ValueError('Go image must be versioned and pinned by SHA256')
+    return key, value, tuple(map(int, match.groups()))
+
+
+def docker_go_pin(version):
+    """Resolve only the official library/golang image, never a user-provided registry."""
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        raise ValueError('Invalid compiler version')
+    with urllib.request.urlopen('https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/golang:pull', timeout=60) as response:
+        token = json.load(response)['token']
+    request = urllib.request.Request('https://registry-1.docker.io/v2/library/golang/manifests/' + version + '-alpine',
+                                     headers={'Authorization': 'Bearer ' + token, 'Accept': MANIFEST_TYPES}, method='HEAD')
+    with urllib.request.urlopen(request, timeout=60) as response:
+        digest = response.headers.get('Docker-Content-Digest', '')
+    if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
+        raise ValueError('Official compiler image digest is missing')
+    return 'golang:' + version + '-alpine@' + digest
+
+
 class GitHub:
     def __init__(self, token=None):
         self.token = token if token is not None else os.environ.get('GH_TOKEN', '')

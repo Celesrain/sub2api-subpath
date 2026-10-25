@@ -1,5 +1,6 @@
 """Resolve the latest stable release into a local lock; promotion follows successful publishing."""
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -7,7 +8,7 @@ import os
 from pathlib import Path
 import re
 import urllib.request
-from automation import GitHub, STABLE_REF
+from automation import GitHub, STABLE_REF, go_requirement, go_image, docker_go_pin
 
 ROOT = Path(__file__).resolve().parent
 
@@ -27,7 +28,7 @@ def source_digest(repository, revision):
     return digest.hexdigest()
 
 
-def resolve(lock, github, digest_source=source_digest):
+def resolve(lock, github, digest_source=source_digest, compiler_pin=docker_go_pin):
     repository = lock['repository']
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Invalid upstream repository')
@@ -49,6 +50,18 @@ def resolve(lock, github, digest_source=source_digest):
         raise ValueError('Invalid source archive checksum')
     result = copy.deepcopy(lock)
     result.update(ref=ref, revision=revision, commit_date=commit['commit']['committer']['date'], source_sha256=digest)
+    module = github.request('/repos/' + repository + '/contents/backend/go.mod?ref=' + revision)
+    if module.get('encoding') != 'base64':
+        raise ValueError('Expected base64 Go module content')
+    required = go_requirement(base64.b64decode(module['content']).decode('utf8'))
+    old_key, _, current_go = go_image(result['images'])
+    if required > current_go:
+        version = '.'.join(map(str, required))
+        pinned = compiler_pin(version)
+        new_key = 'golang:' + version + '-alpine'
+        go_image({new_key: pinned})
+        del result['images'][old_key]
+        result['images'][new_key] = pinned
     return result, True
 
 

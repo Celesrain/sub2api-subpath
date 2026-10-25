@@ -1,5 +1,6 @@
 """Regression tests for upstream resolution, retained versions and publish boundaries."""
 import copy
+import base64
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 import urllib.error
 
-from automation import GitHub, Registry, build_version, require_new_publication
+from automation import GitHub, Registry, build_version, require_new_publication, go_image, go_requirement
 from sync_upstream import resolve
 import ci
 
@@ -19,7 +20,8 @@ ENV = {'GITHUB_ACTIONS': 'true', 'GITHUB_RUN_ID': '123456789', 'GITHUB_RUN_ATTEM
        'GITHUB_ACTOR': 'test-actor', 'GH_TOKEN': 'synthetic-test-token', 'GITHUB_REF': 'refs/heads/main'}
 LOCK = {'repository': 'Wei-Shaw/sub2api', 'ref': 'v0.2.17', 'revision': '1' * 40,
         'commit_date': '2026-10-16T04:28:11Z', 'source_sha256': '2' * 64,
-        'patch_revision': 2, 'images': {'example': 'sha256:pinned'}}
+        'patch_revision': 2, 'images': {'example': 'sha256:pinned',
+        'golang:1.27.2-alpine': 'golang:1.27.2-alpine@sha256:' + '5' * 64}}
 
 
 class BuildIdentityTests(unittest.TestCase):
@@ -57,6 +59,7 @@ class SyncTests(unittest.TestCase):
         github.request.side_effect = [
             {'tag_name': 'v0.2.18', 'draft': False, 'prerelease': False},
             {'sha': '3' * 40, 'commit': {'committer': {'date': '2026-10-23T07:00:00Z'}}},
+            {'encoding': 'base64', 'content': base64.b64encode(b'module example\ngo 1.27.2\n').decode()},
         ]
         before = copy.deepcopy(LOCK)
         result, changed = resolve(LOCK, github, digest)
@@ -80,6 +83,26 @@ class SyncTests(unittest.TestCase):
         github.request.side_effect = [{'tag_name': 'v0.2.18'}, {'sha': 'short'}]
         with self.assertRaises(ValueError):
             resolve(LOCK, github, Mock())
+
+    def test_new_go_requirement_updates_only_the_compiler_pin(self):
+        github = Mock()
+        github.request.side_effect = [{'tag_name': 'v0.2.18'},
+            {'sha': '3' * 40, 'commit': {'committer': {'date': '2026-10-23T07:00:00Z'}}},
+            {'encoding': 'base64', 'content': base64.b64encode(b'module example\ngo 1.27.3\n').decode()}]
+        pin = Mock(return_value='golang:1.27.3-alpine@sha256:' + '6' * 64)
+        result, changed = resolve(LOCK, github, Mock(return_value='4' * 64), pin)
+        self.assertTrue(changed)
+        pin.assert_called_once_with('1.27.3')
+        self.assertEqual(go_image(result['images'])[2], (1, 27, 3))
+        self.assertEqual(result['images']['example'], LOCK['images']['example'])
+        self.assertIn('golang:1.27.2-alpine', LOCK['images'])
+
+    def test_go_directives_and_unpinned_images_are_checked(self):
+        self.assertEqual(go_requirement('module example\ngo 1.27.3\ntoolchain go1.27.4\n'), (1, 27, 4))
+        with self.assertRaises(ValueError):
+            go_requirement('module example\n')
+        with self.assertRaises(ValueError):
+            go_image({'golang:1.27.3-alpine': 'golang:1.27.3-alpine'})
 
 
 class RegistryTests(unittest.TestCase):
@@ -140,6 +163,7 @@ class PublicationTests(unittest.TestCase):
                        'version': version, 'image_reference': 'sub2api-subpath:' + version, 'image_id': 'sha256:' + 'b' * 64,
                        'build_run_id': ENV['GITHUB_RUN_ID'], 'build_run_attempt': '1', 'upstream_ref': 'v0.2.17',
                        'upstream_revision': LOCK['revision'], 'patch_revision': 2, 'lock_changed': False,
+                       'images': LOCK['images'],
                        'lock_sha256': hashlib.sha256(lock_bytes).hexdigest(), 'base_lock_sha256': hashlib.sha256(lock_bytes).hexdigest()}
         (self.dist / 'build.json').write_text(json.dumps(self.record))
         for context in [patch.object(ci, 'ROOT', self.root), patch.object(ci, 'DIST', self.dist), patch.dict(os.environ, ENV, clear=True)]:
@@ -205,7 +229,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(github.request.call_args.kwargs['data'], {'sha': 'new-commit', 'force': False})
 
     def test_promotion_rejects_unrelated_recipe_changes(self):
-        candidate = {**LOCK, 'ref': 'v0.2.18', 'revision': '3' * 40, 'images': {'example': 'changed'}}
+        candidate = {**LOCK, 'ref': 'v0.2.18', 'revision': '3' * 40, 'images': {**LOCK['images'], 'example': 'changed'}}
         data = (json.dumps(candidate) + '\n').encode()
         (self.dist / 'upstream.lock.json').write_bytes(data)
         receipt = {**self.record, 'lock_changed': True, 'lock_sha256': hashlib.sha256(data).hexdigest()}

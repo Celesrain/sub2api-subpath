@@ -10,6 +10,10 @@ The build resolves a release to a full upstream commit and source SHA256,
 applies all three patches, and runs the frontend/backend checks and disposable
 smoke tests at `/`, `/s2a/` and `/tools/ai/`. The build job has read-only
 repository permissions and does not receive the publisher's package-write token.
+If upstream raises its minimum Go version, the resolver pins the corresponding
+official `library/golang` image by digest. Existing newer compiler pins are kept;
+other base images are not silently changed. Unavailable compiler images stop the
+build rather than use an unpinned fallback.
 Failed patches, builds or tests never reach the publisher. Production containers
 and databases are not accessed by this workflow.
 
@@ -46,8 +50,9 @@ and therefore cannot replace a version that has already been pushed.
 
 The new lock is initially local to the build. Only after tests and publishing
 succeed does the publisher advance `upstream.lock.json` on `main`. It updates only
-the upstream ref, commit, commit date and archive checksum; image pins, patches
-and deployment settings remain unchanged. A concurrent change to `main` is never
+the upstream ref, commit, commit date and archive checksum, plus a verified compiler
+upgrade when required. Other image pins, patches and deployment settings remain
+unchanged. A concurrent change to `main` is never
 force-pushed over; a later check can retry promotion.
 
 The lock-only commit uses the workflow's `GITHUB_TOKEN`. GitHub does not create
