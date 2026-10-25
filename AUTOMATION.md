@@ -1,0 +1,58 @@
+# Upstream tracking and retained builds
+
+The builder checks the latest stable `Wei-Shaw/sub2api` release daily at
+00:20 Asia/Shanghai (16:20 UTC). GitHub's scheduled delivery can be delayed.
+Pushes to `main` and manual runs with an empty upstream ref also check for a
+new stable release. A scheduled check with no new release skips the image build.
+Manual runs can specify an explicit release tag to rebuild an older version.
+
+The build resolves a release to a full upstream commit and source SHA256,
+applies all three patches, and runs the frontend/backend checks and disposable
+smoke tests at `/`, `/s2a/` and `/tools/ai/`. The build job has read-only
+repository permissions and does not receive the publisher's package-write token.
+Failed patches, builds or tests never reach the publisher. Production containers
+and databases are not accessed by this workflow.
+
+## A separate version for every build
+
+An example version is:
+
+`0.2.18-subpath.2-run.123456789.1`
+
+It records the upstream version, patch revision, GitHub run ID and run attempt.
+A new run or a complete rerun produces a different version, even for the same
+upstream release and builder commit. Local builds use a UTC timestamp and random
+suffix instead. The unique version is embedded into the application and OCI labels.
+`build.py --image` accepts a repository without a tag; the unique tag is appended.
+
+Only that unique tag is pushed to `ghcr.io/celesrain/sub2api-subpath`.
+The publisher refuses a pre-existing image version or build release and does not
+update `latest`, commit-only tags or bare upstream-version tags. Existing legacy
+tags remain in place and are no longer advanced by this workflow.
+
+Each publication also creates a separate `build-<version>` GitHub release with
+the image digest, upstream and recipe commits, source/patch checksums, tested
+paths and workflow link. Pin deployments to a version or image digest. Neither
+old images nor releases are deleted by any automation in this repository.
+Actions image archives and receipts have 90-day retention; versioned GHCR images
+and GitHub releases are independent of that artifact expiration.
+
+An existing version causes publishing to stop rather than overwrite it. To make
+a new build after a partial publication, use **Re-run all jobs** or start a new
+manual run. Re-running only a failed publisher reuses the original tested artifact
+and therefore cannot replace a version that has already been pushed.
+
+## Advancing the lock
+
+The new lock is initially local to the build. Only after tests and publishing
+succeed does the publisher advance `upstream.lock.json` on `main`. It updates only
+the upstream ref, commit, commit date and archive checksum; image pins, patches
+and deployment settings remain unchanged. A concurrent change to `main` is never
+force-pushed over; a later check can retry promotion.
+
+The lock-only commit uses the workflow's `GITHUB_TOKEN`. GitHub does not create
+another push-triggered workflow for that commit, avoiding a rebuild loop. The
+daily workflow itself performs the check, build and publication; it does not
+depend on a token-generated commit triggering a second workflow.
+
+This repository builds and publishes images. Server deployment is a separate step.

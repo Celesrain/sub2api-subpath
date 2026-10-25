@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
+from automation import build_version
 
 ROOT = Path(__file__).resolve().parent
 
@@ -105,7 +106,7 @@ def prepare(lock, ref, work, source_archive=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ref', help='Upstream release tag, e.g. v0.2.17; default: upstream.lock.json')
-    parser.add_argument('--image', help='Local image tag; default: sub2api-subpath:<version>-subpath.<patch>')
+    parser.add_argument('--image', help='Local image repository without a tag; every build gets a unique tag')
     parser.add_argument('--source-archive', type=Path, help='Optional locked upstream source archive')
     parser.add_argument('--keep-smoke', action='store_true', help='Keep isolated smoke containers for browser verification')
     parser.add_argument('--prepare-only', action='store_true', help='Validate source and patches without building')
@@ -114,7 +115,11 @@ def main():
     ref = args.ref or lock['ref']
     if not re.fullmatch(r'v\d+\.\d+\.\d+(?:[-.][A-Za-z0-9_.-]+)?', ref):
         parser.error('--ref must be an explicit release tag; latest/main are deliberately rejected')
-    image = args.image or f'sub2api-subpath:{ref.removeprefix("v")}-subpath.{lock["patch_revision"]}'
+    version = build_version(ref, lock['patch_revision'])
+    repository = args.image or 'sub2api-subpath'
+    if ':' in repository.rsplit('/', 1)[-1] or '@' in repository:
+        parser.error('--image is a repository, not a tag or digest')
+    image = repository + ':' + version
     if not re.fullmatch(r'[a-z0-9][a-z0-9._/:-]*', image):
         parser.error('Invalid local image tag')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
@@ -123,7 +128,9 @@ def main():
     artifacts = ROOT / '.artifacts'
     artifacts.mkdir(exist_ok=True)
     context, manifest = prepare(lock, ref, work, args.source_archive)
-    manifest.update({'local_image': image, 'platform': 'linux/amd64'})
+    manifest.update({'local_image': image, 'platform': 'linux/amd64', 'build_version': version,
+                     'build_run_id': os.environ.get('GITHUB_RUN_ID'),
+                     'build_run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT')})
     result_file = artifacts / (stamp + '.json')
     result_file.write_text(json.dumps(manifest, indent=2), encoding='utf8')
     print(json.dumps({'stage': 'prepared', 'image': image, 'revision': manifest['upstream_revision'],
@@ -133,7 +140,7 @@ def main():
     log = artifacts / (stamp + '.build.log')
     build = ['docker', 'buildx', 'build', '--load', '--platform', 'linux/amd64', '--progress', 'plain',
              '--metadata-file', str(artifacts / (stamp + '.buildkit.json')), '-t', image,
-             '--build-arg', 'VERSION=' + ref.removeprefix('v') + '-subpath.' + str(lock['patch_revision']),
+             '--build-arg', 'VERSION=' + version,
              '--build-arg', 'COMMIT=' + manifest['upstream_revision'],
              '--build-arg', 'DATE=' + manifest['commit_date'],
              '--build-arg', 'GOPROXY=https://proxy.golang.org,direct',
@@ -143,7 +150,7 @@ def main():
         build += ['--build-arg', argument + '=' + lock['images'][source]]
     for key, value in {'org.opencontainers.image.source': 'https://github.com/' + lock['builder_repository'],
                        'org.opencontainers.image.revision': os.environ.get('GITHUB_SHA', manifest['upstream_revision']),
-                       'org.opencontainers.image.version': ref.removeprefix('v') + '-subpath.' + str(lock['patch_revision']),
+                       'org.opencontainers.image.version': version,
                        'io.suzuira.sub2api.base-path': lock['base_path'],
                        'io.suzuira.sub2api.variant': 'embedded-runtime-base',
                        'io.suzuira.sub2api.upstream-revision': manifest['upstream_revision']}.items():
@@ -170,3 +177,4 @@ if __name__ == '__main__':
     except Exception as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
+

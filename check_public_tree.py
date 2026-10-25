@@ -9,7 +9,7 @@ ALLOWED = {
     'LICENSE', 'NOTICE', 'build.py', 'ci.py', 'check_public_tree.py', 'compose.yml',
     'nginx_config.py', 'smoke_test.py', 'test_nginx_env.py', 'upstream.lock.json',
     'patches/frontend-subpath.patch', 'patches/runtime-base.patch', 'patches/docker-build.patch',
-    'smoke/compose.yml',
+    'smoke/compose.yml', 'AUTOMATION.md', 'automation.py', 'sync_upstream.py', 'test_automation.py',
 }
 
 
@@ -35,3 +35,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

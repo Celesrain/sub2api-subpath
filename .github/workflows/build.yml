@@ -4,14 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '20 16 * * *' # Daily at 00:20 Asia/Shanghai; GitHub scheduling is best effort.
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: 'Explicit upstream release tag; leave empty for upstream.lock.json'
+        description: 'Explicit upstream release tag; empty checks the latest stable release'
         type: string
         default: ''
       publish:
-        description: 'Publish the verified image to GHCR'
+        description: 'Publish this verified build as a new version'
         type: boolean
         default: true
 
@@ -20,12 +22,15 @@ permissions:
 
 concurrency:
   group: image-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      built: ${{ steps.build.outcome == 'success' }}
+      artifact_name: verified-image-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -35,38 +40,54 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Check upload allowlist and environment-file integration
+      - name: Test automation and public source boundaries
         run: |
+          python -m unittest -v test_automation.py
           python check_public_tree.py
           python test_nginx_env.py
           docker compose --env-file .env.template config --quiet
           python nginx_config.py --env-file .env.template > /tmp/sub2api-locations.conf
-      - name: Build and test the locked upstream variant
+      - name: Resolve latest stable upstream
+        id: upstream
+        if: github.event_name != 'pull_request' && inputs.upstream_ref == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python sync_upstream.py --output "$GITHUB_OUTPUT"
+      - name: Set up Buildx
+        if: github.event_name != 'schedule' || steps.upstream.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build and test a new version
+        id: build
+        if: github.event_name != 'schedule' || steps.upstream.outputs.changed == 'true'
         env:
           UPSTREAM_REF: ${{ inputs.upstream_ref }}
         run: python ci.py build
       - name: Export only the verified image and public provenance
+        if: steps.build.outcome == 'success'
+        env:
+          UPSTREAM_LOCK_CHANGED: ${{ steps.upstream.outputs.changed }}
+          BASE_LOCK_SHA256: ${{ steps.upstream.outputs.base_lock_sha256 }}
         run: python ci.py export
-      - name: Save verified image
+      - name: Save this build without replacing earlier attempts
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verified-image
+          name: verified-image-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/image.tar.gz
             dist/build.json
+            dist/upstream.lock.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
           compression-level: 0
 
   publish:
     needs: build
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    if: needs.build.outputs.built == 'true' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - name: Check out publisher
@@ -77,10 +98,10 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - name: Download this run's verified image
+      - name: Download this build's verified image
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: verified-image
+          name: ${{ needs.build.outputs.artifact_name }}
           path: dist
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -88,5 +109,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify artifact and publish tested image
+      - name: Publish a unique image and permanent build release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python ci.py publish
+      - name: Advance the lock only after successful publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python ci.py promote-lock
+      - name: Save publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/published.json
+          if-no-files-found: error
+          retention-days: 90
