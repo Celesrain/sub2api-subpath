@@ -55,10 +55,13 @@ After a GitHub account or repository rename, update `builder_repository` in
 `upstream.lock.json` to match the current `GITHUB_REPOSITORY` before rebuilding.
 The lock supplies the image source label and exported provenance; the publisher
 keeps requiring an exact repository match. A new build publishes under the new
-GHCR namespace. Existing releases and images under `celesrain/sub2api-subpath`
-remain unchanged, and their provenance can still be compared when advancing
-Latest. The deployment template retains its existing pinned image until a
-separate deployment upgrade.
+GHCR namespace. GitHub moved the existing package from `celesrain/sub2api-subpath`
+to `suzuira01/sub2api-subpath`; its old version tags and image digests are retained,
+but the old pull address no longer works. Existing GitHub release records remain
+unchanged, and their provenance can still be compared when advancing Latest.
+The deployment template uses the new namespace with its existing fixed version.
+Existing deployments need the same address change before their next image pull;
+upgrading their application version remains a separate deployment step.
 
 The new lock is initially local to the build. Only after tests and publishing
 succeed does the publisher advance `upstream.lock.json` on `main`. It updates only
