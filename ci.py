@@ -104,7 +104,9 @@ def publish():
     assert re.fullmatch(r'[a-z0-9_.-]+/[a-z0-9_.-]+', repository)
     revision = os.environ['GITHUB_SHA']
     assert re.fullmatch(r'[a-f0-9]{40}', revision) and revision == record['source_revision']
-    assert record['source_repository'].lower() == repository
+    assert record['source_repository'].lower() == repository, (
+        'Build provenance repository differs from GITHUB_REPOSITORY; '
+        'update upstream.lock.json builder_repository after a rename and rebuild')
     assert re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,127}', record['version'])
     assert re.fullmatch(r'[a-z0-9][a-z0-9._/:-]*', record['image_reference'])
     assert record['build_run_id'] == os.environ['GITHUB_RUN_ID']

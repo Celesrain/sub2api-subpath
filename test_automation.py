@@ -16,7 +16,7 @@ import ci
 
 
 ENV = {'GITHUB_ACTIONS': 'true', 'GITHUB_RUN_ID': '123456789', 'GITHUB_RUN_ATTEMPT': '1',
-       'GITHUB_REPOSITORY': 'Celesrain/sub2api-subpath', 'GITHUB_SHA': 'a' * 40,
+       'GITHUB_REPOSITORY': 'Suzuira01/sub2api-subpath', 'GITHUB_SHA': 'a' * 40,
        'GITHUB_ACTOR': 'test-actor', 'GH_TOKEN': 'synthetic-test-token', 'GITHUB_REF': 'refs/heads/main'}
 LOCK = {'repository': 'Wei-Shaw/sub2api', 'ref': 'v0.2.17', 'revision': '1' * 40,
         'commit_date': '2026-10-16T04:28:11Z', 'source_sha256': '2' * 64,
@@ -178,6 +178,17 @@ class PublicationTests(unittest.TestCase):
                 ci.publish()
             run.assert_not_called()
 
+    def test_stale_repository_identity_stops_before_registry_or_docker(self):
+        self.record['source_repository'] = 'Celesrain/sub2api-subpath'
+        (self.dist / 'build.json').write_text(json.dumps(self.record))
+        with patch.object(ci, 'Registry') as registry, patch.object(ci, 'GitHub') as github, \
+             patch.object(ci, 'run') as run:
+            with self.assertRaisesRegex(AssertionError, 'update upstream.lock.json builder_repository'):
+                ci.publish()
+        registry.assert_not_called()
+        github.assert_not_called()
+        run.assert_not_called()
+
     def test_success_publishes_new_version_and_matching_latest(self):
         registry, github = Mock(), Mock()
         registry.manifest_digest.side_effect = [None, 'sha256:' + 'c' * 64, 'sha256:' + 'c' * 64]
@@ -187,8 +198,8 @@ class PublicationTests(unittest.TestCase):
              patch.object(ci, 'run') as run, patch.object(ci.subprocess, 'check_output', return_value=image):
             ci.publish()
         pushes = [call.args[0] for call in run.call_args_list if call.args[0][:2] == ['docker', 'push']]
-        self.assertEqual(pushes, [['docker', 'push', 'ghcr.io/celesrain/sub2api-subpath:' + self.record['version']],
-                                 ['docker', 'push', 'ghcr.io/celesrain/sub2api-subpath:latest']])
+        self.assertEqual(pushes, [['docker', 'push', 'ghcr.io/suzuira01/sub2api-subpath:' + self.record['version']],
+                                 ['docker', 'push', 'ghcr.io/suzuira01/sub2api-subpath:latest']])
         create = github.request.call_args_list[-2]
         self.assertEqual(create.kwargs['data']['tag_name'], 'build-' + self.record['version'])
         self.assertEqual(create.kwargs['data']['make_latest'], 'false')
@@ -201,6 +212,16 @@ class PublicationTests(unittest.TestCase):
         github = Mock()
         github.request.return_value = {'body': '```json\n' + json.dumps(previous) + '\n```'}
         self.assertFalse(ci.may_advance_latest(self.record, github))
+
+    def test_renamed_repository_advances_legacy_latest(self):
+        previous = {**self.record, 'source_repository': 'Celesrain/sub2api-subpath',
+                    'upstream_ref': 'v0.2.16', 'build_run_id': '1'}
+        body = '```json\n' + json.dumps(previous) + '\n```'
+        github = Mock()
+        github.request.return_value = {'body': body}
+        self.assertTrue(ci.may_advance_latest(self.record, github))
+        github.request.assert_called_once_with('/repos/Suzuira01/sub2api-subpath/releases/latest', missing_ok=True)
+        self.assertEqual(github.request.return_value['body'], body)
 
     def test_latest_checks_branch_prerelease_and_lock_high_water(self):
         github = Mock()

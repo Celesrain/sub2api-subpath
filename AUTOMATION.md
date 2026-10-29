@@ -29,7 +29,7 @@ upstream release and builder commit. Local builds use a UTC timestamp and random
 suffix instead. The unique version is embedded into the application and OCI labels.
 `build.py --image` accepts a repository without a tag; the unique tag is appended.
 
-That unique tag is pushed to `ghcr.io/celesrain/sub2api-subpath` and never replaced.
+That unique tag is pushed to `ghcr.io/suzuira01/sub2api-subpath` and never replaced.
 The publisher refuses a pre-existing image version or build release. It also
 updates the movable `latest` image alias and GitHub Latest release when the new
 build is a newer verified stable build from `main`. Older upstream rebuilds,
@@ -50,6 +50,15 @@ manual run. Re-running only a failed publisher reuses the original tested artifa
 and therefore cannot replace a version that has already been pushed.
 
 ## Advancing the lock
+
+After a GitHub account or repository rename, update `builder_repository` in
+`upstream.lock.json` to match the current `GITHUB_REPOSITORY` before rebuilding.
+The lock supplies the image source label and exported provenance; the publisher
+keeps requiring an exact repository match. A new build publishes under the new
+GHCR namespace. Existing releases and images under `celesrain/sub2api-subpath`
+remain unchanged, and their provenance can still be compared when advancing
+Latest. The deployment template retains its existing pinned image until a
+separate deployment upgrade.
 
 The new lock is initially local to the build. Only after tests and publishing
 succeed does the publisher advance `upstream.lock.json` on `main`. It updates only
